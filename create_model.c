@@ -1,5 +1,5 @@
    /* test code for coordinate transformation */
-
+/* priority 1: adaptive integrator for radiative transfer eqn */
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
@@ -9,8 +9,25 @@
 #include "make_vis.h"
 #include "constants.h"
 
-void dump_vis(struct model_fft *vis, int npix){
-  
+struct mcmc_trace{
+  double **params;
+  double *log_likelihood;
+  int nparams; 
+  int nsamples;
+};
+
+//219 200 1858
+
+void initialize_trace(struct mcmc_trace *trace, int nsamples, int nparams){
+  int i;
+  trace->params = (double  **) malloc(sizeof(double *)*nsamples);
+  trace->log_likelihood = (double *)malloc(sizeof(double)*nsamples);
+  for(i = 0; i < nsamples; i++)
+    trace->params[i] = (double *)malloc(sizeof(double)*nparams);
+  return;
+}
+
+void dump_vis(struct model_fft *vis, int npix){ 
   int i;
   for(i=0;i<npix;i++)
     fprintf(stdout,"%g \t %g \t %g \t %g\n",vis->u[i], vis->v[i], vis->real[i],vis->imag[i]);
@@ -53,12 +70,13 @@ void define_coordinate_transform(double **combined_transform, double inc, double
     free(inc_transform[i]);
     free(pa_transform[i]);
   }
+  fprintf(stderr,"\n");
   if(DEBUG){
     for(i = 0; i<3;i++){
       for(j = 0; j<3;j++)
 	fprintf(stderr,"%lf ",combined_transform[i][j]);
-      fprintf(stderr,"\n");
     } 
+    fprintf(stderr,"\n");
   }
 
   free(inc_transform);
@@ -134,10 +152,29 @@ void create_grid(double *x, double *y, double *z, int npix, double inc, double p
     double zval = zind > 0 ? pow(10,(log10(zmax) - log10(zmin))/(NZ/2)*zind + log10(zmin)): 
       -1*pow(10,(log10(zmax) - log10(zmin))/(NZ/2)*(abs(zind)) + log10(zmin));  
     x[i] = ((i % npix) - npix/2)*DIST*pix_scale;  
+    // if((x[i] < (4.4*AU)) && (x[i] > (4.3*AU)))
+    //  fprintf(stderr,"pix = %d \n",i%npix);
     y[i] = (((i / npix)%npix - npix/2))*DIST*pix_scale;  
     z[i] = return_zconst_plane(x[i],y[i],zval,inc,pa); /*currently only the disk plane */
   }
 
+}
+
+/* interpolates the model fft onto the data uv coordinates */
+
+void interpolate_fft(struct model_fft *fft, struct data_vis *vis, 
+		     struct data_vis *model){
+  
+}
+
+double compute_log_likelihood(struct data_vis *vis, struct data_vis *model){
+  int npts = vis->npts;
+  int i;
+  double log_likelihood = 0.;
+  for(i = 0; i < npts; i++)
+    log_likelihood = pow((vis->real[i]-model->real[i]),2)*vis->wgt[i]+ 
+      pow((vis->imag[i]-model->imag[i]),2)*vis->wgt[i];
+  return log_likelihood;
 }
 
 void initialize_image(double *im, int npix){
@@ -263,20 +300,33 @@ double total(double *arr, int npix){
 
 
 void integrate_radiative_transfer(double *im, double *proj_tau, double *temp, double *tau, int npix){
-  int i;
+  int i,j;
   double pix_scale = IMSIZE/npix;
   double flux;
+  double delta_tau_lim  = 0.1; 
+  double delta_tau;
   for(i = npix*npix*NZ-1; i >= npix*npix;i--){ 
+    delta_tau = (tau[i] - tau[i - npix*npix]);
+    int steps = (int)(delta_tau / delta_tau_lim);
+    
     double source_fn = temp[i] > 0 ? 2*PLANCK*NU*NU*NU/(CC*CC) * 
       1.0/(exp(PLANCK*NU/(KB*temp[i]))-1) : 0 ;
     
+    if(steps <= 1)
       im[i % (npix*npix)] =im[i % (npix*npix)] 
 	+ source_fn*exp(-1*tau[i])*(tau[i] - tau[i-npix*npix]);
-      
-      if(i > npix*npix*NZ - npix*npix){
-	proj_tau[npix*npix*NZ-i] = tau[i];
+    else
+      {
+	delta_tau = (tau[i] - tau[i-npix*npix])/steps;
+	for(j=0;j<steps;j++)     
+	  im[i % (npix*npix)] =im[i % (npix*npix)] 
+	    + source_fn*exp(-1*(tau[i-npix*npix]+j*delta_tau))*delta_tau;
       }
   }
+  if(i > npix*npix*NZ - npix*npix){
+    proj_tau[npix*npix*NZ-i] = tau[i];
+  }
+  
   
 
   for(i = 0; i < npix*npix;i++)
@@ -313,7 +363,7 @@ int main(int argc, char *argv[]){
   double subpixels = atof(argv[4]); 
 
   /* model parameterization */
-  double disk_param[6] = {2E1,15*AU,1,0.5,0.0,0.0}; 
+  double disk_param[6] = {2E2,15*AU,1,0.5,0.0,0.0}; 
   double env_param[3]  = {1E-18,0.5,1.0};
   double inc = disk_param[4];
   double pa  = disk_param[5];
@@ -443,7 +493,7 @@ int main(int argc, char *argv[]){
     make_fits_model_im("after.fits",modelim->im,size,dim,pix_scale);   
     compute_fft(padded_image,sizepad,dim,modelvis);
 
-    dump_vis(modelvis,npix*npix*pad*pad);
+    //    dump_vis(modelvis,npix*npix*pad*pad);
 
     make_fits_model_im("padded_real.fits",modelvis->real,sizepad,dim,pix_scale);   
     make_fits_model_im("padded_imag.fits",modelvis->imag,sizepad,dim,pix_scale);   
